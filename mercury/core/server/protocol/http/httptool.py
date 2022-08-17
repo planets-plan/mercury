@@ -1,4 +1,0 @@
-
-
-class HTTPToolProtocol:
-    pass
