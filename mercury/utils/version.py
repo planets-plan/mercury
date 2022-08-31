@@ -3,7 +3,7 @@ import functools
 import subprocess
 
 from pathlib import Path
-from typing import Tuple, Union
+from typing import Tuple, Optional
 
 VERSION = Tuple[int, int, int, str, int]
 
@@ -25,7 +25,7 @@ def get_main_version(version: VERSION = None):
 
 
 @functools.lru_cache
-def get_git_change_time() -> Union[str, None]:
+def get_git_change_time() -> Optional[str]:
     repo_dir = Path(".").parent.parent.absolute()
     git_log = subprocess.run(
         "git log --pretty=format:%ct --quiet -1 HEAD",
