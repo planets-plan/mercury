@@ -1,9 +1,9 @@
 from argparse import ArgumentParser
 
-from mercury.core.management.base import BaseCommand
+from mercury.core.management import TemplateCommand
 
 
-class Command(BaseCommand):
+class Command(TemplateCommand):
     help = "Create a Mercury project directory."
     missing_args_message = "You must provide a project name."
 
@@ -12,8 +12,7 @@ class Command(BaseCommand):
         parser.add_argument("directory", nargs="?", help="Optional destination directory")
 
     def handle(self, *args, **options):
-        self.stdout.write("hello, world")
-        project_name = options.pop("name")
+        name = options.pop("name")
         target = options.pop("directory")
-        self.stdout.write(project_name)
-        self.stdout.write(target)
+
+        super().handle("project", name=name, target=target, **options)

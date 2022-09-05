@@ -1,10 +1,10 @@
-import argparse
-import os.path
 import sys
+import os.path
+import argparse
 
 from io import TextIOBase, TextIOWrapper
-from typing import Any, Optional, TypedDict
-from argparse import Namespace, HelpFormatter, ArgumentParser
+from typing import Any, Sequence, Optional, TypedDict
+from argparse import Action, Namespace, HelpFormatter, ArgumentParser
 
 import mercury
 from mercury.core.management.color import no_style, color_style
@@ -31,6 +31,41 @@ class CommandError(Exception):
     def __init__(self, *args: Any, returncode: int = 1, **kwargs: Any):
         self.returncode = returncode
         super().__init__(*args, **kwargs)
+
+
+class ParserYesNoAction(Action):
+    def __init__(
+        self,
+        option_strings: Sequence[str],
+        dest: str,
+        required: bool = False,
+        help: Optional[str] = None,
+        default: Optional[str] = None,
+    ) -> None:
+        if default is None:
+            raise ValueError("You must provide a default with Yes/No action.")
+        if len(option_strings) != 1:
+            raise ValueError("Only single argument is allowed with Yes/No action.")
+
+        opt = option_strings[0]
+        if not opt.startswith("--"):
+            raise ValueError("Yes/No arguments must be prefixed with --.")
+
+        opt = opt[2:]
+        opts = ["--" + opt, "--no-" + opt]
+        super(ParserYesNoAction, self).__init__(opts, dest, nargs=0, const=None, default=default, required=required, help=help)
+
+    def __call__(
+            self,
+            parser: ArgumentParser,
+            namespace: Namespace,
+            values: Any,
+            option_string: Optional[str] = None
+    ) -> None:
+        if option_string.startswith("--no-"):
+            setattr(namespace, self.dest, False)
+        else:
+            setattr(namespace, self.dest, True)
 
 
 class CommandParser(ArgumentParser):
@@ -195,6 +230,18 @@ class BaseCommand:
         )
         self.add_base_argument(
             parser,
+            "-v",
+            "--verbosity",
+            default=1,
+            type=int,
+            choices=[0, 1, 2, 3],
+            help=(
+                "Verbosity level; 0=minimal output, 1=normal output, 2=verbose output, "
+                "3=very verbose output"
+            ),
+        )
+        self.add_base_argument(
+            parser,
             "--no-color",
             action="store_true",
             help="Don't colorize the command output.",
@@ -220,6 +267,7 @@ class BaseCommand:
         try:
             self.execute(*args, **cmd_options)
         except CommandError as e:
+            self.stderr.write(f"{e.__class__.__name__}: {e}")
             sys.exit(e.returncode)
         finally:
             pass

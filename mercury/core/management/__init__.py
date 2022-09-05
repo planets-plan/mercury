@@ -9,7 +9,17 @@ from importlib import import_module
 
 import mercury
 from mercury.conf import settings
-from mercury.core.management.base import BaseCommand
+
+from .base import BaseCommand, ParserYesNoAction
+from .template import TemplateCommand
+
+
+__all__ = [
+    "BaseCommand",
+    "TemplateCommand",
+    "ParserYesNoAction",
+    "execute_from_command_line"
+]
 
 
 def find_commands(management_dir: Path) -> list[str]:
@@ -66,8 +76,6 @@ class ManagementUtility:
             subcommand = self.argv[1]
         except IndexError:
             subcommand = "help"
-
-        parser = None
 
         if subcommand == "help":
             pass

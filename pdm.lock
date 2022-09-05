@@ -1,6 +1,15 @@
+[[package]]
+name = "h11"
+version = "0.13.0"
+requires_python = ">=3.6"
+summary = "A pure-Python, bring-your-own-I/O implementation of HTTP/1.1"
 
 [metadata]
 lock_version = "4.0"
-content_hash = "sha256:d71f0c7d39d9cc41a0b8cc8e6b749c6d4d2855de906b58e389dc2b44680bc6bf"
+content_hash = "sha256:64e498e60616f1ee8b94bcb4507ec7c474d465009aee6502a9d0825021ead83c"
 
 [metadata.files]
+"h11 0.13.0" = [
+    {url = "https://files.pythonhosted.org/packages/19/d2/32a15a4955be1b8114a1c570999eefd31279c7f9aa2d2a43d492a79b53c5/h11-0.13.0-py3-none-any.whl", hash = "sha256:8ddd78563b633ca55346c8cd41ec0af27d3c79931828beffb46ce70a379e7442"},
+    {url = "https://files.pythonhosted.org/packages/fa/a6/450568b2d62dd633be53f69890332bb0ce78183ffbe1e514c2b3102efff5/h11-0.13.0.tar.gz", hash = "sha256:70813c1135087a248a4d38cc0e1a0181ffab2188141a93eaf567940c3957ff06"},
+]
