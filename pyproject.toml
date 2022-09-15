@@ -23,4 +23,5 @@ build-backend = "pdm.pep517.api"
 [tool.pdm.dev-dependencies]
 dev = [
     "h11>=0.13.0",
+    "fastapi>=0.82.0",
 ]

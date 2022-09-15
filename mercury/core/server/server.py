@@ -14,7 +14,7 @@ from mercury.core.server.config import Config
 from mercury.core.server.lifespan import LifespanOn, LifespanOff
 
 
-logger = logging.getLogger("mercury.error")
+logger = logging.getLogger("mercury.server")
 
 HANDLED_SIGNALS = (
     signal.SIGINT,  # Unix signal 2. Sent by Ctrl+C.

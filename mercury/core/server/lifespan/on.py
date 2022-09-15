@@ -19,7 +19,7 @@ class LifespanOn:
             config.load()
 
         self.config = config
-        self.logger = logging.getLogger("mercury.server.error")
+        self.logger = logging.getLogger("mercury.server")
         self.startup_event = asyncio.Event()
         self.shutdown_event = asyncio.Event()
         self.receive_queue: asyncio.Queue[LifespanReceiveMessage] = asyncio.Queue()

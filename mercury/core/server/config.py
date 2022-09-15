@@ -84,47 +84,37 @@ class Config:
         self.is_loaded = True
 
     def config_logging(self):
-        self.log_level = None
-        self.log_config = {
-            "version": 1,
-            "disable_existing_loggers": False,
-            "handlers": {
-                "default": {
-                    "class": "logging.StreamHandler",
-                    "stream": "ext://sys.stderr",
+        DEFAULT_LOGGING = {
+            'version': 1,
+            'disable_existing_loggers': False,
+            'formatters': {
+                'mercury.server': {
+                    '()': 'mercury.utils.log.ServerFormatter',
+                    'format': '[{server_time}] {message}',
+                    'style': '{',
+                }
+            },
+            'handlers': {
+                'console': {
+                    'level': 'INFO',
+                    'class': 'logging.StreamHandler',
                 },
-                "access": {
-                    "class": "logging.StreamHandler",
-                    "stream": "ext://sys.stdout",
+                'mercury.server': {
+                    'level': 'INFO',
+                    'class': 'logging.StreamHandler',
+                    'formatter': 'mercury.server',
                 },
             },
-            "loggers": {
-                "mercury": {"handlers": ["default"], "level": "INFO"},
-                "mercury.error": {"level": "INFO"},
-                "mercury.access": {"handlers": ["access"], "level": "INFO", "propagate": False},
-            },
+            'loggers': {
+                'mercury': {
+                    'handlers': ['console'],
+                    'level': 'INFO',
+                },
+                'mercury.server': {
+                    'handlers': ['mercury.server'],
+                    'level': 'INFO',
+                    'propagate': False,
+                },
+            }
         }
-
-        TRACE_LOG_LEVEL = 5
-        LOG_LEVELS: Dict[str, int] = {
-            "critical": logging.CRITICAL,
-            "error": logging.ERROR,
-            "warning": logging.WARNING,
-            "info": logging.INFO,
-            "debug": logging.DEBUG,
-            "trace": TRACE_LOG_LEVEL,
-        }
-        logging.addLevelName(TRACE_LOG_LEVEL, "TRACE")
-
-        if self.log_config is not None:
-            if isinstance(self.log_config, dict):
-                logging.config.dictConfig(self.log_config)
-
-        if self.log_level is not None:
-            if isinstance(self.log_level, str):
-                log_level = LOG_LEVELS[self.log_level]
-            else:
-                log_level = self.log_level
-            logging.getLogger("uvicorn.error").setLevel(log_level)
-            logging.getLogger("uvicorn.access").setLevel(log_level)
-            logging.getLogger("uvicorn.asgi").setLevel(log_level)
+        logging.config.dictConfig(DEFAULT_LOGGING)

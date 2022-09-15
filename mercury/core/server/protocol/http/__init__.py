@@ -78,8 +78,8 @@ class H11Protocol(asyncio.Protocol):
         self.config = config
         self.app = config.loaded_app
         self.loop = _loop or asyncio.get_event_loop()
-        self.logger = logging.getLogger("uvicorn.error")
-        self.access_logger = logging.getLogger("uvicorn.access")
+        self.logger = logging.getLogger("mercury.server")
+        self.access_logger = logging.getLogger("mercury.server")
         self.access_log = self.access_logger.hasHandlers()
         self.conn = h11.Connection(h11.SERVER, DEFAULT_MAX_INCOMPLETE_EVENT_SIZE)
         self.ws_protocol_class = config.ws_protocol_class

@@ -1,5 +1,5 @@
-from base import View
-from viewset import ViewSet, ModelViewSet
+from .base import View
+from .viewset import ViewSet, ModelViewSet
 
 
 __all__ = [
