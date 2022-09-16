@@ -4,6 +4,11 @@
 
 基于 Python 的异步 Web 框架
 
+## 标准化
+
+名词均使用单数
+初始化动作 -> feature_init
+
 ## 概念
 
 ### 应用 ASGI Application

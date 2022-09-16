@@ -1,5 +1,6 @@
 import asyncio
 import urllib.parse
+from ssl import SSLContext
 from typing import TYPE_CHECKING, Optional, Tuple
 
 from mercury.type import WWWScope
@@ -36,6 +37,10 @@ def get_local_addr(transport: asyncio.Transport) -> Optional[Tuple[str, int]]:
 
 def is_ssl(transport: asyncio.Transport) -> bool:
     return bool(transport.get_extra_info("sslcontext"))
+
+
+def get_sslcontext(transport: asyncio.Transport) -> SSLContext:
+    return transport.get_extra_info("sslcontext")
 
 
 def get_client_addr(scope: "WWWScope") -> str:
