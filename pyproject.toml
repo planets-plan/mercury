@@ -1,11 +1,12 @@
 [project]
 name = "planet-mercury"
-version = "0.0.2"
-description = "A python ASGI framework in planets plan project."
+version = "0.0.3"
+description = "An Async Python Web Framework and Server in Planets Plan."
 authors = [
     {name = "RyomaHan", email = "ryomahan1996@gmail.com"},
 ]
-dependencies = []
+dependencies = [
+]
 requires-python = ">=3.9"
 readme = "README.md"
 license = {text = "MIT"}
@@ -15,13 +16,18 @@ mercury = "mercury.core.management:execute_from_command_line"
 
 [project.optional-dependencies]
 [build-system]
-requires = ["pdm-pep517>=1.0.0"]
+requires = ["pdm-pep517>=1.0.0", "Cython>=0.29.32"]
 build-backend = "pdm.pep517.api"
 
 [tool]
 [tool.pdm]
+
+[tool.pdm.build]
+package-dir = "mercury"
+setup-script = "build.py"
+run-setuptools = true
+
 [tool.pdm.dev-dependencies]
 dev = [
-    "h11>=0.13.0",
-    "fastapi>=0.82.0",
+    "Cython>=0.29.32",
 ]

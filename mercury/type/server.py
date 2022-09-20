@@ -10,8 +10,8 @@ SpecificationType = Literal["auto", "asgi", "wsgi"]
 
 class ServerConfigOptions(TypedDict):
     app: Union[ASGIApplication, Callable, str]
-    host: str
-    port: int
+    host: Optional[str]
+    port: Optional[int]
     debug: bool
     reload: bool
     workers: Optional[int]
