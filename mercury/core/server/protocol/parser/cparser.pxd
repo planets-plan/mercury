@@ -148,4 +148,4 @@ cdef extern from "llhttp.h":
     const char* llhttp_get_error_reason(const llhttp_t* parser)
     const char* llhttp_method_name(llhttp_method_t method)
 
-    void llhttp_set_error_reason(llhttp_t* parser, const char* reason);
+    void llhttp_set_error_reason(llhttp_t* parser, const char* reason)

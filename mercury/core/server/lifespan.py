@@ -1,8 +1,8 @@
 import asyncio
 import logging
 
-from mercury.core.server.config import Config
 from mercury.type import (
+    TYPE_CHECKING,
     LifespanScope,
     LifespanSendMessage,
     LifespanStartupEvent,
@@ -10,15 +10,44 @@ from mercury.type import (
     LifespanReceiveMessage,
 )
 
+if TYPE_CHECKING:
+    from mercury.core.server.server import Server
+
+
+__all__ = ["Lifespan", "LifespanOn", "LifespanOff"]
+
+
 STATE_TRANSITION_ERROR = "Got invalid state transition on lifespan protocol."
 
 
-class LifespanOn:
-    def __init__(self, config: Config) -> None:
-        if not config.is_loaded:
-            config.load()
+class Lifespan:
+    def __init__(self) -> None:
+        self.should_exit = False
 
-        self.config = config
+    async def startup(self) -> None:
+        raise NotImplementedError()
+
+    async def shutdown(self) -> None:
+        raise NotImplementedError()
+
+
+class LifespanOff(Lifespan):
+    def __init__(self) -> None:
+        super().__init__()
+
+    async def startup(self) -> None:
+        pass
+
+    async def shutdown(self) -> None:
+        pass
+
+
+class LifespanOn(Lifespan):
+
+    def __init__(self, server: "Server") -> None:
+        super().__init__()
+
+        self.server = server
         self.logger = logging.getLogger("mercury.server")
         self.startup_event = asyncio.Event()
         self.shutdown_event = asyncio.Event()
@@ -26,7 +55,6 @@ class LifespanOn:
         self.error_occured = False
         self.startup_failed = False
         self.shutdown_failed = False
-        self.should_exit = False
 
     async def startup(self) -> None:
         self.logger.info("Waiting for application startup.")
@@ -37,7 +65,7 @@ class LifespanOn:
         await self.receive_queue.put(startup_event)
         await self.startup_event.wait()
 
-        if self.startup_failed or (self.error_occured and self.config.specification == "asgi"):
+        if self.startup_failed or (self.error_occured and self.server.specification == "asgi"):
             self.logger.error("Application startup failed. Exiting.")
             self.should_exit = True
         else:
@@ -51,7 +79,7 @@ class LifespanOn:
         await self.receive_queue.put(shutdown_event)
         await self.shutdown_event.wait()
 
-        if self.shutdown_failed or (self.error_occured and self.config.specification == "asgi"):
+        if self.shutdown_failed or (self.error_occured and self.server.specification == "asgi"):
             self.logger.error("Application shutdown failed. Exiting.")
             self.should_exit = True
         else:
@@ -59,10 +87,10 @@ class LifespanOn:
 
     async def main(self) -> None:
         try:
-            app = self.config.loaded_app
+            app = self.server.loaded_app
             scope: LifespanScope = {
                 "type": "lifespan",
-                "asgi": {"version": self.config.asgi_version, "spec_version": "2.0"},
+                "asgi": {"version": self.server.asgi_version, "spec_version": "2.0"},
             }
             await app(scope, self.receive, self.send)
         except BaseException as e:
@@ -70,7 +98,7 @@ class LifespanOn:
             self.error_occured = True
             if self.startup_failed or self.shutdown_failed:
                 return
-            if self.config.specification == "wsgi":
+            if self.server.specification == "wsgi":
                 self.logger.info("ASGI 'lifespan' protocol appears unsupported.")
             else:
                 self.logger.error("Exception in 'lifespan' protocol\n", exc_info=e)

@@ -6,7 +6,7 @@ summary = "The Cython compiler for writing C extensions for the Python language.
 
 [metadata]
 lock_version = "4.0"
-content_hash = "sha256:e5960a8748d31b159d2818ba60df89fab20d2b6ba6b718f163d70e7da3785c15"
+content_hash = "sha256:57e1003c0a24e92e6a0e9bf0a4860480d874b5713ad63bbe2618e4d234de5def"
 
 [metadata.files]
 "cython 0.29.32" = [

@@ -23,7 +23,6 @@ build-backend = "pdm.pep517.api"
 [tool.pdm]
 
 [tool.pdm.build]
-package-dir = "mercury"
 setup-script = "build.py"
 run-setuptools = true
 

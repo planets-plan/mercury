@@ -12,10 +12,10 @@ class ServerConfigOptions(TypedDict):
     app: Union[ASGIApplication, Callable, str]
     host: Optional[str]
     port: Optional[int]
-    debug: bool
-    reload: bool
-    workers: Optional[int]
-    headers: List[Tuple[str, str]]
-    server_header: bool
-    proxy_headers: bool
+    debug: Optional[bool]
+    reload: Optional[bool]
+    worker_number: Optional[int]
+    headers: Optional[List[Tuple[str, str]]]
+    server_header: Optional[bool]
+    proxy_headers: Optional[bool]
     specification: Optional[SpecificationType]

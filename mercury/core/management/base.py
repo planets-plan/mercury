@@ -6,8 +6,8 @@ from io import TextIOBase, TextIOWrapper
 from typing import Any, Sequence, Optional, TypedDict
 from argparse import Action, Namespace, HelpFormatter, ArgumentParser
 
-import mercury
-from mercury.core.management.color import no_style, color_style
+from mercury import get_version
+from mercury.utils.terminal_color import no_style, color_style
 
 
 class ParserOptions(TypedDict):
@@ -200,7 +200,7 @@ class BaseCommand:
         #     raise TypeError("requires_system_checks must be a list or tuple.")
 
     def get_version(self):
-        return mercury.get_version()
+        return get_version()
 
     def add_arguments(self, parser: ArgumentParser):
         pass

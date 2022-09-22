@@ -1,6 +1,19 @@
 """
 terminal_color.py
 """
+import functools
+import os
+import sys
+
+try:
+    import colorama
+
+    colorama.init()
+except (ImportError, OSError):
+    HAS_COLORAMA = False
+else:
+    HAS_COLORAMA = True
+
 
 color_names = ("black", "red", "green", "yellow", "blue", "magenta", "cyan", "white")
 foreground = {color_names[x]: "3%s" % x for x in range(8)}
@@ -15,69 +28,9 @@ opt_dict = {
     "conceal": "8",
 }
 
-
-def colorize(text="", opts=(), **kwargs):
-    """
-    Return your text, enclosed in ANSI graphics codes.
-
-    Depends on the keyword arguments 'fg' and 'bg', and the contents of
-    the opts tuple/list.
-
-    Return the RESET code if no parameters are given.
-
-    Valid colors:
-        'black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white'
-
-    Valid options:
-        'bold'
-        'underscore'
-        'blink'
-        'reverse'
-        'conceal'
-        'noreset' - string will not be auto-terminated with the RESET code
-
-    Examples:
-        colorize('hello', fg='red', bg='blue', opts=('blink',))
-        colorize()
-        colorize('goodbye', opts=('underscore',))
-        print(colorize('first line', fg='red', opts=('noreset',)))
-        print('this should be red too')
-        print(colorize('and so should this'))
-        print('this should not be red')
-    """
-    code_list = []
-    if text == "" and len(opts) == 1 and opts[0] == "reset":
-        return "\x1b[%sm" % RESET
-    for k, v in kwargs.items():
-        if k == "fg":
-            code_list.append(foreground[v])
-        elif k == "bg":
-            code_list.append(background[v])
-    for o in opts:
-        if o in opt_dict:
-            code_list.append(opt_dict[o])
-    if "noreset" not in opts:
-        text = "%s\x1b[%sm" % (text or "", RESET)
-    return "%s%s" % (("\x1b[%sm" % ";".join(code_list)), text or "")
-
-
-def make_style(opts=(), **kwargs):
-    """
-    Return a function with default parameters for colorize()
-
-    Example:
-        bold_red = make_style(opts=('bold',), fg='red')
-        print(bold_red('hello'))
-        KEYWORD = make_style(fg='yellow')
-        COMMENT = make_style(fg='blue', opts=('bold',))
-    """
-    return lambda text: colorize(text, opts, **kwargs)
-
-
 NOCOLOR_PALETTE = "nocolor"
 DARK_PALETTE = "dark"
 LIGHT_PALETTE = "light"
-
 PALETTES = {
     NOCOLOR_PALETTE: {
         "ERROR": {},
@@ -138,6 +91,19 @@ PALETTES = {
     },
 }
 DEFAULT_PALETTE = DARK_PALETTE
+
+
+def make_style(opts=(), **kwargs):
+    """
+    Return a function with default parameters for colorize()
+
+    Example:
+        bold_red = make_style(opts=('bold',), fg='red')
+        print(bold_red('hello'))
+        KEYWORD = make_style(fg='yellow')
+        COMMENT = make_style(fg='blue', opts=('bold',))
+    """
+    return lambda text: colorize(text, opts, **kwargs)
 
 
 def parse_color_setting(config_string):
@@ -219,3 +185,146 @@ def parse_color_setting(config_string):
     if palette == PALETTES[NOCOLOR_PALETTE]:
         return None
     return palette
+
+
+def supports_color():
+    """
+    Return True if the running system's terminal supports color,
+    and False otherwise.
+    """
+
+    def vt_codes_enabled_in_windows_registry():
+        """
+        Check the Windows Registry to see if VT code handling has been enabled
+        by default, see https://superuser.com/a/1300251/447564.
+        """
+        try:
+            # winreg is only available on Windows.
+            import winreg
+        except ImportError:
+            return False
+        else:
+            try:
+                reg_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Console")
+                reg_key_value, _ = winreg.QueryValueEx(reg_key, "VirtualTerminalLevel")
+            except FileNotFoundError:
+                return False
+            else:
+                return reg_key_value == 1
+
+    # isatty is not always implemented, #6223.
+    is_a_tty = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+
+    return is_a_tty and (
+        sys.platform != "win32"
+        or HAS_COLORAMA
+        or "ANSICON" in os.environ
+        or
+        # Windows Terminal supports VT codes.
+        "WT_SESSION" in os.environ
+        or
+        # Microsoft Visual Studio Code's built-in terminal supports colors.
+        os.environ.get("TERM_PROGRAM") == "vscode"
+        or vt_codes_enabled_in_windows_registry()
+    )
+
+
+class Style:
+    pass
+
+
+def make_style_by_config(config_string=""):
+    """
+    Create a Style object from the given config_string.
+
+    If config_string is empty django.utils.terminal_color.DEFAULT_PALETTE is used.
+    """
+
+    style = Style()
+
+    color_settings = parse_color_setting(config_string)
+
+    # The nocolor palette has all available roles.
+    # Use that palette as the basis for populating
+    # the palette as defined in the environment.
+    for role in PALETTES[NOCOLOR_PALETTE]:
+        if color_settings:
+            format = color_settings.get(role, {})
+            style_func = make_style(**format)
+        else:
+
+            def style_func(x):
+                return x
+
+        setattr(style, role, style_func)
+
+    # For backwards compatibility,
+    # set style for ERROR_OUTPUT == ERROR
+    style.ERROR_OUTPUT = style.ERROR
+
+    return style
+
+
+@functools.lru_cache(maxsize=None)
+def no_style():
+    """
+    Return a Style object with no color scheme.
+    """
+    return make_style_by_config("nocolor")
+
+
+def color_style(force_color=False):
+    """
+    Return a Style object from the Django color scheme.
+    """
+    if not force_color and not supports_color():
+        return no_style()
+    return make_style_by_config(os.environ.get("DJANGO_COLORS", ""))
+
+
+def colorize(text="", opts=(), **kwargs):
+    """
+    Return your text, enclosed in ANSI graphics codes.
+
+    Depends on the keyword arguments 'fg' and 'bg', and the contents of
+    the opts tuple/list.
+
+    Return the RESET code if no parameters are given.
+
+    Valid colors:
+        'black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white'
+
+    Valid options:
+        'bold'
+        'underscore'
+        'blink'
+        'reverse'
+        'conceal'
+        'noreset' - string will not be auto-terminated with the RESET code
+
+    Examples:
+        colorize('hello', fg='red', bg='blue', opts=('blink',))
+        colorize()
+        colorize('goodbye', opts=('underscore',))
+        print(colorize('first line', fg='red', opts=('noreset',)))
+        print('this should be red too')
+        print(colorize('and so should this'))
+        print('this should not be red')
+    """
+    code_list = []
+    if text == "" and len(opts) == 1 and opts[0] == "reset":
+        return "\x1b[%sm" % RESET
+    for k, v in kwargs.items():
+        if k == "fg":
+            code_list.append(foreground[v])
+        elif k == "bg":
+            code_list.append(background[v])
+    for o in opts:
+        if o in opt_dict:
+            code_list.append(opt_dict[o])
+    if "noreset" not in opts:
+        text = "%s\x1b[%sm" % (text or "", RESET)
+    return "%s%s" % (("\x1b[%sm" % ";".join(code_list)), text or "")
+
+
+

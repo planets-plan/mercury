@@ -1,32 +1,9 @@
-from mercury.core.view import View, ViewSet
+from mercury.type import ServerConfigOptions
 
-
-class Response:
-    pass
-
-
-async def test(request):
-    return Response()
-
-
-class TestView(View):
-
-    def get(self, request):
-        pass
-
-
-class TestViewSet(ViewSet):
-
-    def list(self, request):
-        pass
+from mercury.core.server import run
 
 
 async def app(scope, receive, send):
-    import json
-    # import pprint
-    # pprint.pp(scope)
-    with open("test.txt", "a+") as f:
-        f.write(str(scope))
     body = "Hello, world!".encode("utf-8")
     raw_headers = []
     content_length = str(len(body))
@@ -42,3 +19,19 @@ async def app(scope, receive, send):
     )
 
     await send({"type": "http.response.body", "body": body})
+
+
+if __name__ == "__main__":
+    options: ServerConfigOptions = {
+        "app": app,
+        "host": "127.0.0.1",
+        "port": 9999,
+        "debug": False,
+        "reload": False,
+        "worker_number": 1,
+        "headers": [],
+        "server_header": False,
+        "proxy_headers": False,
+        "specification": "asgi"
+    }
+    run(**options)

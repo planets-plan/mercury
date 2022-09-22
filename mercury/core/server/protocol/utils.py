@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 from mercury.type import WWWScope
 
 
-def get_remote_addr(transport: asyncio.Transport) -> Optional[Tuple[str, int]]:
+def get_client_addr(transport: asyncio.Transport) -> Optional[Tuple[str, int]]:
     socket_info = transport.get_extra_info("socket")
     if socket_info is not None:
         try:
@@ -23,7 +23,7 @@ def get_remote_addr(transport: asyncio.Transport) -> Optional[Tuple[str, int]]:
     return None
 
 
-def get_local_addr(transport: asyncio.Transport) -> Optional[Tuple[str, int]]:
+def get_server_addr(transport: asyncio.Transport) -> Optional[Tuple[str, int]]:
     socket_info = transport.get_extra_info("socket")
     if socket_info is not None:
         info = socket_info.getsockname()
@@ -43,11 +43,11 @@ def get_sslcontext(transport: asyncio.Transport) -> SSLContext:
     return transport.get_extra_info("sslcontext")
 
 
-def get_client_addr(scope: "WWWScope") -> str:
-    client = scope.get("client")
-    if not client:
-        return ""
-    return "%s:%d" % client
+# def get_client_addr(scope: "WWWScope") -> str:
+#     client = scope.get("client")
+#     if not client:
+#         return ""
+#     return "%s:%d" % client
 
 
 def get_path_with_query_string(scope: "WWWScope") -> str:
