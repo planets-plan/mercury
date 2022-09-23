@@ -1,7 +1,7 @@
 import asyncio
 import urllib.parse
 from ssl import SSLContext
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import Optional, Tuple
 
 from mercury.type import WWWScope
 

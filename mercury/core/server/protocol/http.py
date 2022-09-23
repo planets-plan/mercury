@@ -1,7 +1,9 @@
+import asyncio
 import http
 import logging
 import urllib.parse
 
+from collections import deque
 from asyncio import Protocol, Transport
 
 from mercury.type import List, Tuple, Literal, Optional, TYPE_CHECKING
@@ -10,7 +12,8 @@ from .utils import get_server_addr, get_client_addr
 from .parser import HttpParserError, HttpParserUpgrade, HttpRequestParser
 
 if TYPE_CHECKING:
-    from mercury.type import HTTPScope
+    from mercury.type import Deque
+    from mercury.type import HTTPScope, ASGI3Application
     from mercury.core.server.server import Server, ServerHandler
 
 
@@ -32,13 +35,24 @@ class HttpProtocol(Protocol):
     ASGI HTTP sub-specification's asyncio protocol, using llhttp as parser.
     """
 
-    def __init__(self, server: "Server") -> None:
+    def __init__(self, server: "Server", _loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
         self.server = server
-        self.server_handler: Optional["ServerHandler"] = None
+        self.loop = _loop or asyncio.get_running_loop()
+        self.handler: Optional["ServerHandler"] = None
         self.parser: HttpRequestParser = HttpRequestParser(self)
         self.transport: Optional[Transport] = None
         self.error_logger = logging.getLogger("mercury.server.error")
         self.access_logger = logging.getLogger("mercury.server.access")
+
+        # state
+        self.is_read_paused: bool = False
+        self.is_write_paused: bool = False
+        self.is_100_continue: bool = False
+
+        # Response State
+        self.is_chunked_encoding: Optional[bool] = None
+        self.is_response_start: bool = False
+        self.is_response_complete: bool = False
 
         # HTTP Connection Scope
         self.url = b""
@@ -47,6 +61,7 @@ class HttpProtocol(Protocol):
         self.headers: List[Tuple[bytes, bytes]] = []
         self.server_addr: Optional[Tuple[str, int]] = None
         self.client_addr: Optional[Tuple[str, int]] = None
+        self.pipeline: Deque[Tuple["ServerHandler", "ASGI3Application"]] = deque()
 
     def connection_made(self, transport: Transport) -> None:
         # TODO logging
@@ -106,14 +121,17 @@ class HttpProtocol(Protocol):
 
     def on_url(self, url: bytes) -> None:
         self.url += url
-        print("on_url done")
 
     def on_header(self, name: bytes, value: bytes) -> None:
         name = name.lower()
         if name == b"expect" and value.lower() == b"100-continue":
-            pass
+            self.is_100_continue = True
         self.headers.append((name, value))
-        print("on_header done")
+
+    def _pause_reading(self) -> None:
+        if not self.is_read_paused:
+            self.is_read_paused = True
+            self.transport.pause_reading()
 
     def on_header_complete(self) -> None:
         http_version = self.parser.get_http_version()
@@ -134,23 +152,25 @@ class HttpProtocol(Protocol):
         self.scope["raw_path"] = raw_path
         self.scope["query_string"] = parsed_url.query or b""
 
-        self.server_handler = self.server.handler_class(
-            scope=self.scope,
-            transport=self.transport,
-            keep_alive=http_version != "1.0",
-        )
-        print("on_header_complete done")
+        # TODO handle 503
+
+        current_handler = self.handler
+        self.handler = self.server.handler_class(scope=self.scope, transport=self.transport)
+        if current_handler is None or current_handler.is_finished:
+            task = self.loop.create_task(self.handler.run(self.server.loaded_app))
+            task.add_done_callback(self.server.tasks.discard)
+            self.server.tasks.add(task)
+        else:
+            self._pause_reading()
+            self.pipeline.appendleft((self.handler, self.server.loaded_app))
 
     def on_body(self, body: bytes) -> None:
-        if self.parser.should_upgrade():
+        if self.parser.should_upgrade() or self.handler.is_finished:
             return
 
-        self.body += body
-
-        HIGH_WATER_LIMIT = 65536
-        if len(self.body) > HIGH_WATER_LIMIT:
-            pass
-        print("on_body done")
+        self.handler.body += body
+        if len(self.handler.body) > 65536:
+            self._pause_reading()
 
     def on_message_complete(self) -> None:
         print("on_message_complete done")
