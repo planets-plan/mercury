@@ -44,11 +44,13 @@ if TYPE_CHECKING:
         ASGIReceiveEvent,
         ASGI3Application,
         ServerConfigOptions,
+        HTTPRequestEvent,
+        HTTPDisconnectEvent,
+        HTTPResponseBodyEvent,
         HTTPResponseStartEvent,
     )
+    CustomProtocol = Union[HttpProtocol]
 
-
-logger = logging.getLogger("mercury.server")
 
 HANDLED_SIGNALS = (
     signal.SIGINT,  # Unix signal 2. Sent by Ctrl+C.
@@ -90,6 +92,7 @@ def _asyncio_event_loop_init(need_subprocess: bool = False) -> None:
 
 
 class Server:
+    count = 1
 
     @property
     def asgi_version(self) -> Literal["2.0", "3.0"]:
@@ -133,13 +136,16 @@ class Server:
         self.encoded_headers: List[Tuple[bytes, bytes]] = []
 
         # attribute
+        self.logger = logging.getLogger("mercury.server.access")
+        self.error_logger = logging.getLogger("mercury.server.error")
         self.lifespan: Optional["Lifespan"] = None
         self.loaded_app: Optional[Callable] = None
         self.handler_class: Type[ServerHandler] = ServerHandler
 
         # server state
+        self.servers: List[asyncio.AbstractServer] = []
         self.tasks: Set[asyncio.Task] = set()
-        self.connections: Set[asyncio.Protocol] = set()
+        self.connections: Set["CustomProtocol"] = set()
         self.request_number: int = 0
         self._asgi_version: Optional[Literal["2.0", "3.0"]] = None
 
@@ -154,6 +160,29 @@ class Server:
 
         # start load func, load ssl, header and app.
         self.load()
+        print(f"{Server.count} server")
+        Server.count += 1
+
+    def _handle_exit(self, sig: int, frame: Optional[FrameType]) -> None:
+        if self.should_exit and sig == signal.SIGINT:
+            self.force_exit = True
+        else:
+            self.should_exit = True
+
+    def _install_signal_handlers(self) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            # Signals can only be listened to from the main thread.
+            return
+
+        loop = asyncio.get_event_loop()
+
+        try:
+            for sig in HANDLED_SIGNALS:
+                loop.add_signal_handler(sig, self._handle_exit, sig, None)
+        except NotImplementedError:  # pragma: no cover
+            # Windows
+            for sig in HANDLED_SIGNALS:
+                signal.signal(sig, self._handle_exit)
 
     def load(self) -> None:
         # load event loop
@@ -177,14 +206,14 @@ class Server:
             (key.lower().encode("latin1"), value.encode("latin1"))
             for key, value in self.headers
         ]
-        if b"server" not in dict(self.encoded_headers) and self.server_header:
+        if b"server" not in dict(self.encoded_headers) and self.has_server_header:
             self.encoded_headers.insert(0, (b"server", b"server"))
 
         # load app
         try:
             self.loaded_app = import_app_from_string(self.app)
         except ImportFromStringError as e:
-            logger.error(f"Error loading ASGI app. {e}")
+            self.logger.error(f"Error loading ASGI app. {e}")
             sys.exit(1)
 
         # load specification
@@ -205,38 +234,11 @@ class Server:
             self._asgi_version = "2.0"
             self.loaded_app = ASGI2Middleware(self.loaded_app)
 
+        # load debug
         if self.debug:
             self.loaded_app = DebugMiddleware(self.loaded_app)
 
-        self.is_loaded = True
-
-    def run(self, sockets: Optional[List[socket.socket]] = None) -> None:
-        return asyncio.run(self.server(sockets=sockets))
-
-    def _handle_exit(self, sig: int, frame: Optional[FrameType]) -> None:
-        if self.should_exit and sig == signal.SIGINT:
-            self.force_exit = True
-        else:
-            self.should_exit = True
-
-    def _install_signal_handlers(self) -> None:
-        if threading.current_thread() is not threading.main_thread():
-            # Signals can only be listened to from the main thread.
-            return
-
-        loop = asyncio.get_event_loop()
-
-        try:
-            for sig in HANDLED_SIGNALS:
-                loop.add_signal_handler(sig, self._handle_exit, sig, None)
-        except NotImplementedError:  # pragma: no cover
-            # Windows
-            for sig in HANDLED_SIGNALS:
-                signal.signal(sig, self._handle_exit)
-
-    async def server(self, sockets: Optional[List[socket.socket]] = None) -> None:
-        process_id = os.getpid()
-
+        # load lifespan
         if self.specification != "wsgi":
             self.lifespan = LifespanOff()
         else:
@@ -245,16 +247,69 @@ class Server:
         # bind func to handle the signal
         self._install_signal_handlers()
 
-        logger.info(colorize(f"Start server process [{process_id}]", fg='green'))
+        self.is_loaded = True
 
-        await self.startup(sockets=sockets)
-        if self.should_exit:
+    # serve-startup
+    def log_started_message(self, listeners: Sequence[socket.SocketType]) -> None:
+        if self.fd is not None:
+            pass
+        elif self.uds is not None:
+            pass
+        else:
+            host = "0.0.0.0" if self.host is None else self.host
+
+            port = self.port
+            if port == 0:
+                port = listeners[0].getsockname()[1]
+
+            protocol_name = "http"
+
+            message = f"MercuryServer running on {protocol_name}://{host}:{port} (Press CTRL+C to quit)"
+            self.logger.info(message)
+
+    def start_with_tcp(self):
+        pass
+
+    async def startup(self, sockets: Optional[List] = None) -> None:
+        # call lifespan startup
+        await self.lifespan.startup()
+        if self.lifespan.should_exit:
+            self.should_exit = True
             return
-        await self.main_loop()
-        await self.shutdown(sockets=sockets)
 
-        logger.info(f"Finished server process [{process_id}]")
+        # create server serve socket
+        loop = asyncio.get_running_loop()
+        protocol = functools.partial(HttpProtocol, server=self)
+        listeners: Sequence[socket.SocketType]
 
+        if sockets is not None:
+            listeners = []
+        elif self.fd is not None:
+            listeners = []
+        elif self.uds is not None:
+            listeners = []
+        else:
+            try:
+                server = await loop.create_server(
+                    protocol, host=self.host, port=self.port, ssl=self.ssl, backlog=2048,
+                )
+            except OSError as e:
+                self.logger.error(e)
+                await self.lifespan.shutdown()
+                sys.exit(1)
+
+            assert server.sockets is not None
+            listeners = server.sockets
+            self.servers = [server]
+
+        if sockets is None:
+            self.log_started_message(listeners)
+        else:
+            pass
+
+        self.is_started = True
+
+    # serve-main loop
     async def on_tick(self, counter: int) -> bool:
         if counter % 10 == 0:
             self.default_headers = self.encoded_headers
@@ -272,96 +327,78 @@ class Server:
             await asyncio.sleep(0.1)
             should_exit = await self.on_tick(counter)
 
-    def _log_started_message(self, listeners: Sequence[socket.SocketType]) -> None:
-
-        if self.fd is not None:
-            pass
-        elif self.uds is not None:
-            pass
-        else:
-            host = "0.0.0.0" if self.host is None else self.host
-
-            port = self.port
-            if port == 0:
-                port = listeners[0].getsockname()[1]
-
-            protocol_name = "http"
-
-            message = f"MercuryServer running on {protocol_name}://{host}:{port} (Press CTRL+C to quit)"
-            logger.info(message)
-
-    async def startup(self, sockets: Optional[List] = None) -> None:
-        await self.lifespan.startup()
-        if self.lifespan.should_exit:
-            self.should_exit = True
-            return
-
-        loop = asyncio.get_running_loop()
-        protocol = functools.partial(HttpProtocol, server=self)
-        listeners: Sequence[socket.SocketType]
-
-        if sockets is not None:
-            pass
-        elif self.fd is not None:
-            pass
-        elif self.uds is not None:
-            pass
-        else:
-            try:
-                server = await loop.create_server(
-                    protocol,
-                    host=self.host,
-                    port=self.port,
-                    ssl=None,
-                    backlog=2048,
-                )
-            except OSError as e:
-                logger.error(e)
-                await self.lifespan.shutdown()
-                sys.exit(1)
-
-            assert server.sockets is not None
-            listeners = server.sockets
-            self.servers = [server]
-
-        if sockets is None:
-            self._log_started_message(listeners)
-        else:
-            pass
-
-        self.is_started = True
-
-    async def shutdown(self, sockets: Optional[List] = None) -> None:
-        logger.info("Shutting down...")
+    # serve-shutdown
+    async def shutdown(self, sockets: Optional[List[socket.socket]] = None) -> None:
+        self.logger.info("Shutting down...")
 
         for server in self.servers:
             server.close()
+
         for sock in sockets or []:
             sock.close()
+
         for server in self.servers:
             await server.wait_closed()
 
+        # Request shutdown on all existing connections
         for connection in list(self.connections):
             connection.shutdown()
         await asyncio.sleep(0.1)
 
+        # Wait for existing connections to finish sending response
+        if self.connections and not self.force_exit:
+            msg = "Waiting for connections to close. (CTRL+C to force quit)"
+            self.logger.info(msg)
+            while self.connections and not self.force_exit:
+                await asyncio.sleep(0.1)
+
+        # Wait for existing tasks to complete
+        if self.tasks and not self.force_exit:
+            self.logger.info("Waiting for background tasks to complete. (CTRL+C to force quit)")
+            while self.tasks and not self.force_exit:
+                await asyncio.sleep(0.1)
+
+        # Send the lifespan shutdown event and wait for application shutdown
+        if not self.force_exit:
+            await self.lifespan.shutdown()
+
+    async def serve(self, sockets: Optional[List[socket.socket]] = None) -> None:
+        process_id = os.getpid()
+
+        self.logger.info(colorize(f"Start MercuryServer on process [{process_id}]", fg='green'))
+
+        await self.startup(sockets=sockets)
+        if self.should_exit:
+            return
+        await self.main_loop()
+        print("main_loop over")
+        await self.shutdown(sockets=sockets)
+
+        self.logger.info(f"Finished the MercuryServer on process [{process_id}]")
+
+    def run(self, sockets: Optional[List[socket.socket]] = None) -> None:
+        return asyncio.run(self.serve(sockets=sockets))
+
 
 class ServerHandler:
+    count = 1
 
     def __init__(self, scope: "Scope", protocol: "HttpProtocol", transport: asyncio.Transport) -> None:
         self.scope = scope
         self.protocol = protocol
         self.transport = transport
 
+        self.logger = protocol.server.logger
+        self.message_event = asyncio.Event()
+
         self.status_line = {
             status_code: self._get_status_line(status_code) for status_code in range(100, 600)
         }
 
-        # response stare
-        self.is_started = False
-        self.is_finished = False
-        self.is_chunked_encoding = None
+        print(f"you have {ServerHandler.count} server handler")
+        ServerHandler.count += 1
 
+    @staticmethod
     def _get_status_line(status_code: int) -> bytes:
         try:
             phrase = http.HTTPStatus(status_code).phrase.encode()
@@ -377,7 +414,7 @@ class ServerHandler:
             )
         message = cast("HTTPResponseStartEvent", message)
 
-        self.is_started = True
+        self.protocol.is_response_start = True
         self.protocol.is_100_continue = False
 
         status_code: int = message.get("status")
@@ -396,21 +433,42 @@ class ServerHandler:
                 raise RuntimeError("Invalid HTTP header value.")
 
             name = name.lower()
-            if name == b"content-length" and self.chunked_encoding is None:
-                self.excepted_content_length = int(value.decode())
+            if name == b"content-length" and self.protocol.is_chunked_encoding is None:
+                self.protocol.excepted_content_length = int(value.decode())
+                self.protocol.is_chunked_encoding = False
             elif name == b"transfer-encoding" and value.lower() == b"chunked":
-                self.excepted_content_length = 0
-                self.chunked_encoding = True
+                self.protocol.excepted_content_length = 0
+                self.protocol.is_chunked_encoding = True
             elif name == b"connection" and value.lower() == b"close":
                 self.keepalive = False
             content.extend([name, b": ", value, b"\r\n"])
 
-        if self.chunked_encoding is None and self.scope["method"] != "HEAD" and status_code not in (204, 304):
-            self.chunked_encoding = True
+        if self.protocol.is_chunked_encoding is None and self.scope["method"] != "HEAD" and status_code not in (204, 304):
+            self.protocol.is_chunked_encoding = True
             content.append(b"transfer-encoding: chunked\r\n")
 
         content.append(b"\r\n")
         self.transport.write(b"".join(content))
+
+    def _on_response_complete(self) -> None:
+        self.protocol.server.request_number += 1
+
+        if self.transport.is_closing():
+            return
+
+        # self._unset_keepalive_if_requite()
+        #
+        # self.timeout_keep_alive_task = self.protocol.loop.call_later(
+        #     self.timeout_keep_alive, self.timemout_keep_alive_handler
+        # )
+
+        self.protocol.resume_reading()
+
+        if self.protocol.pipeline:
+            handler, application = self.protocol.pipeline.pop()
+            task = self.protocol.loop.create_task(self.run(application))
+            task.add_done_callback(self.protocol.server.tasks.discard)
+            self.protocol.server.tasks.add(task)
 
     def _send_response_body(self, message: "ASGISendEvent"):
         message_type = message.get("type", "")
@@ -419,13 +477,13 @@ class ServerHandler:
                 f"Expected ASGI message 'http.response.body', but got '{message_type}'."
             )
 
-        body: bytes = cast(bytes, message.get("body" b""))
+        body: bytes = cast(bytes, message.get("body", b""))
         more_body: bool = message.get("more_body", False)
 
         # handle chunk
         if self.scope["method"] == "HEAD":
-            self.excepted_content_length = 0
-        elif self.chunked_encoding:
+            self.protocol.excepted_content_length = 0
+        elif self.protocol.is_chunked_encoding:
             if body:
                 content = [b"%x\r\n" % len(body), body, b"\r\n"]
             else:
@@ -435,33 +493,35 @@ class ServerHandler:
             self.transport.write(b"".join(content))
         else:
             content_length = len(body)
-            if content_length > self.excepted_content_length:
+            if content_length > self.protocol.excepted_content_length:
                 raise RuntimeError("Response content longer than Content-Length")
             else:
-                self.excepted_content_length -= content_length
+                self.protocol.excepted_content_length -= content_length
             self.transport.write(body)
 
         if not more_body:
-            if self.excepted_content_length != 0:
+            if self.protocol.excepted_content_length != 0:
                 raise RuntimeError("Response content shorter than Content-Length")
-            self.is_finished = True
+            self.protocol.is_response_complete = True
             self.message_event.set()
-            if not self.keepalive:
+            if not self.protocol.is_keep_alive:
                 self.transport.close()
-            self.on_response()
-
+            self._on_response_complete()
 
     async def send(self, message: "ASGISendEvent") -> None:
+        # not disconnected and write paused
         if self.protocol.is_write_paused and not self.protocol.is_disconnected:
-            await self.protocol.drain()
+            await self.protocol.waite_until_can_write()
 
+        # disconnected
         if self.protocol.is_disconnected:
             return
 
-        if not self.is_started:
+        if not self.protocol.is_response_start:
+            # response not start
             self._send_response_start(message)
-
-        elif not self.is_finished:
+        elif not self.protocol.is_response_complete:
+            # response not complete
             self._send_response_body(message)
         else:
             # response is already sent
@@ -477,41 +537,59 @@ class ServerHandler:
         if self.protocol.is_100_continue and not self.transport.is_closing():
             self.handle_100_continue()
 
-        if not self.disconnected and not self.is_finished:
-            pass
+        if not self.protocol.is_disconnected and not self.protocol.is_response_complete:
+            self.protocol.pause_reading()
+            await self.message_event.wait()
+            self.message_event.clear()
 
-        message: dict
-
-        if self.disconnected or self.is_finished:
+        message: "Union[HTTPDisconnectEvent, HTTPRequestEvent]"
+        if self.protocol.is_disconnected or self.protocol.is_response_complete:
             message = {"type": "http.disconnect"}
         else:
             message = {
                 "type": "http.request",
-                "body": self.body,
-                "more_body": self.more_body,
+                "body": self.protocol.body,
+                "more_body": self.protocol.body,
             }
-            self.body = b""
+            self.protocol.body = b""
 
         return message
+
+    async def send_500_response(self) -> None:
+        response_start_event: "HTTPResponseStartEvent" = {
+            "type": "http.response.start",
+            "status": 500,
+            "headers": [
+                (b"content-type", b"text/plain; charset=utf-8"),
+                (b"connection", b"close"),
+            ],
+        }
+        await self.send(response_start_event)
+        response_body_event: "HTTPResponseBodyEvent" = {
+            "type": "http.response.body",
+            "body": b"Internal Server Error",
+            "more_body": False,
+        }
+        await self.send(response_body_event)
 
     async def run(self, application: "ASGI3Application") -> None:
         try:
             result = await application(self.scope, self.receive, self.send)
         except BaseException as e:
             msg = "Exception in ASGI application\n"
-            self.logger.errorr(msg, exc_info=e)
+            self.logger.error(msg, exc_info=e)
 
-            if not self.is_started:
-                await self._send_500_response()
+            if not self.protocol.is_response_start:
+                await self.send_500_response()
             else:
                 self.transport.close()
         else:
             if result is not None:
-                msg = ""
+                self.logger.error(f"ASGI callable should return None, but returned '{result}'.")
                 self.transport.close()
-            elif not self.is_started and not self.is_disconnected:
-                msg = ""
+            elif not self.protocol.is_response_start and not self.protocol.is_disconnected:
+                self.logger.error("ASGI callable returned without starting response.")
                 await self.send_500_response()
-            elif not self.is_finished and not self.is_disconnected:
-                msg = ""
+            elif not self.protocol.is_response_complete and not self.protocol.is_disconnected:
+                self.logger.error("ASGI callable returned without completing response.")
                 self.transport.close()
