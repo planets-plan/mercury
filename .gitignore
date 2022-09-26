@@ -7,7 +7,7 @@ __pycache__/
 *$py.class
 
 # C extensions
-*.c
+#*.c
 *.so
 
 # Distribution / packaging
