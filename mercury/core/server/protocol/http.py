@@ -42,7 +42,13 @@ HTTP_HEADER_VALUE_CHECK_RE = re.compile(b"[\x00-\x1F\x7F]")
 
 
 class ASGIHttpHandler:
-    def __init__(self, scope: "Scope", protocol: "HttpProtocol", transport: "asyncio.Transport", on_response: Callable[..., None]) -> None:
+    def __init__(
+        self,
+        scope: "Scope",
+        protocol: "ASGIHttpProtocol",
+        transport: "asyncio.Transport",
+        on_response: Callable[..., None],
+    ) -> None:
         self.server = protocol.server
         self.logger = protocol.server.logger
         self.transport = transport
@@ -72,6 +78,49 @@ class ASGIHttpHandler:
             phrase = b""
         return b"".join([b"HTTP/1.1 ", str(status_code).encode(), b" ", phrase, b"\r\n"])
 
+    def handle_100_continue(self) -> None:
+        self.transport.write(b"HTTP/1.1 100 Continue\r\n\r\n")
+        self.protocol.is_100_continue = False
+
+    async def send_500_response(self) -> None:
+        response_start_event: "HTTPResponseStartEvent" = {
+            "type": "http.response.start",
+            "status": 500,
+            "headers": [
+                (b"content-type", b"text/plain; charset=utf-8"),
+                (b"connection", b"close"),
+            ],
+        }
+        await self.send(response_start_event)
+        response_body_event: "HTTPResponseBodyEvent" = {
+            "type": "http.response.body",
+            "body": b"Internal Server Error",
+            "more_body": False,
+        }
+        await self.send(response_body_event)
+
+    async def run(self, application: "ASGI3Application") -> None:
+        try:
+            result = await application(self.scope, self.receive, self.send)
+        except BaseException as e:
+            msg = "Exception in ASGI application\n"
+            self.logger.error(msg, exc_info=e)
+
+            if not self.is_response_start:
+                await self.send_500_response()
+            else:
+                self.transport.close()
+        else:
+            if result is not None:
+                self.logger.error(f"ASGI callable should return None, but returned '{result}'.")
+                self.transport.close()
+            elif not self.is_response_start and not self.is_disconnected:
+                self.logger.error("ASGI callable returned without starting response.")
+                await self.send_500_response()
+            elif not self.is_response_complete and not self.is_disconnected:
+                self.logger.error("ASGI callable returned without completing response.")
+                self.transport.close()
+
     def _send_response_start(self, message: "ASGISendEvent") -> None:
         message_type = message.get("type", "")
         if message_type != "http.response.start":
@@ -89,6 +138,16 @@ class ASGIHttpHandler:
         close_header = (b"connection", b"close")
         if close_header in self.scope["headers"] and close_header not in headers:
             headers = headers + [close_header]
+
+        if self.logger:
+            self.logger.info(
+                '%s | %s | %s | HTTP/%s | %d',
+                "%s:%d" % self.scope.get("client", ("", "")),
+                self.scope["method"],
+                self.scope.get("path", ""),
+                self.scope["http_version"],
+                status_code,
+            )
 
         content: List[bytes] = [STATUS_LINE.get(status_code)]
 
@@ -154,58 +213,15 @@ class ASGIHttpHandler:
                 self.transport.close()
             self.on_response()
 
-    def handle_100_continue(self) -> None:
-        self.transport.write(b"HTTP/1.1 100 Continue\r\n\r\n")
-        self.protocol.is_100_continue = False
-
-    async def send_500_response(self) -> None:
-        response_start_event: "HTTPResponseStartEvent" = {
-            "type": "http.response.start",
-            "status": 500,
-            "headers": [
-                (b"content-type", b"text/plain; charset=utf-8"),
-                (b"connection", b"close"),
-            ],
-        }
-        await self.send(response_start_event)
-        response_body_event: "HTTPResponseBodyEvent" = {
-            "type": "http.response.body",
-            "body": b"Internal Server Error",
-            "more_body": False,
-        }
-        await self.send(response_body_event)
-
-    async def run(self, application: "ASGI3Application") -> None:
-        try:
-            result = await application(self.scope, self.receive, self.send)
-        except BaseException as e:
-            msg = "Exception in ASGI application\n"
-            self.logger.error(msg, exc_info=e)
-
-            if not self.is_response_start:
-                await self.send_500_response()
-            else:
-                self.transport.close()
-        else:
-            if result is not None:
-                self.logger.error(f"ASGI callable should return None, but returned '{result}'.")
-                self.transport.close()
-            elif not self.is_response_start and not self.is_disconnected:
-                self.logger.error("ASGI callable returned without starting response.")
-                await self.send_500_response()
-            elif not self.is_response_complete and not self.is_disconnected:
-                self.logger.error("ASGI callable returned without completing response.")
-                self.transport.close()
-
     async def send(self, message: "ASGISendEvent") -> None:
         """ Call all ASGISendEvent(write) event by connection state """
-        if self.protocol.is_write_paused and not self.is_disconnected:
-            # 如果 protocol 没有在处理写事件并且次处理器未被断开：等待直到可以执行写事件
-            await self.protocol.waite_until_can_write()
-
         if self.is_disconnected:
             # 如果处理器处于断开状态
             return
+
+        if self.protocol.is_write_paused and not self.is_disconnected:
+            # 如果 protocol 没有在处理写事件并且次处理器未被断开：等待直到可以执行写事件
+            await self.protocol.waite_until_can_write()
 
         if not self.is_response_start:
             # response not start
@@ -236,15 +252,15 @@ class ASGIHttpHandler:
         else:
             message = {
                 "type": "http.request",
-                "body": self.protocol.body,
-                "more_body": self.protocol.body,
+                "body": self.body,
+                "more_body": self.body,
             }
-            self.protocol.body = b""
+            self.body = b""
 
         return message
 
 
-class HttpProtocol(Protocol):
+class ASGIHttpProtocol(Protocol):
     """
     ASGI HTTP sub-specification's asyncio protocol, using llhttp as parser.
     """
@@ -391,6 +407,10 @@ class HttpProtocol(Protocol):
 
     # llhttp callback
     def on_message_begin(self) -> None:
+        """ Invoked when a new request/response starts.
+
+        Reset connection state and scope dict
+        """
         self.url = b""
         self.headers = []
         self.is_100_continue = False
@@ -458,19 +478,25 @@ class HttpProtocol(Protocol):
             self.pipeline.appendleft((self.handler, self.server.loaded_app))
 
     def on_body(self, body: bytes) -> None:
-        """ Invoked when body  """
+        """ Invoked when start parse http request body
+
+        this function is request read function, read http request body from net to handler
+        """
         if self.parser.should_upgrade() or self.handler.is_response_complete:
             return
 
         self.handler.body += body
         if len(self.handler.body) > 65536:
             self.pause_read()
+
         # when request body is parser complete
         self.handler.event_flag.set()
 
     def on_message_complete(self) -> None:
+        """ Invoked when a request/response has been completedly parsed. """
         if self.parser.should_upgrade() or self.handler.is_response_complete:
             return
+
         self.handler.more_body = False
         if self.handler:
             self.handler.event_flag.set()

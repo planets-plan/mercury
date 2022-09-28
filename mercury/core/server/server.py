@@ -30,15 +30,15 @@ from mercury.type import (
 from mercury.utils.importer import import_app_from_string, ImportFromStringError
 from mercury.utils.terminal_color import colorize
 
-from .protocol import HttpProtocol
+from .protocol import ASGIHttpProtocol
 from .lifespan import LifespanOn, LifespanOff
 from .middleware import WSGIMiddleware, ASGI2Middleware, DebugMiddleware
 
 if TYPE_CHECKING:
     from mercury.core.server.lifespan import Lifespan
-    from mercury.core.server.protocol import HttpProtocol
+    from mercury.core.server.protocol import ASGIHttpProtocol
     from mercury.type import ASGIApplication, ServerConfigOptions
-    CustomProtocol = Union[HttpProtocol]
+    CustomProtocol = Union[ASGIHttpProtocol]
 
 
 HANDLED_SIGNALS = (
@@ -217,7 +217,8 @@ class Server:
             self.load()
 
         process_id = os.getpid()
-        self.logger.info(colorize(f"Start MercuryServer on process [{process_id}]", fg='green'))
+        message = f"Start MercuryServer on process {colorize(f'{process_id}', fg='cyan')}"
+        self.logger.info(message)
 
         # serve main flow
         await self.startup(sockets=sockets)
@@ -226,7 +227,8 @@ class Server:
         await self.main_loop()
         await self.shutdown(sockets=sockets)
 
-        self.logger.info(f"Finished the MercuryServer on process [{process_id}]")
+        message = f"Finished the MercuryServer on process {colorize(f'{process_id}', fg='cyan')}"
+        self.logger.info(message)
 
     async def startup(self, sockets: Optional[List] = None) -> None:
         # call lifespan startup
@@ -237,7 +239,7 @@ class Server:
 
         # create server serve socket
         loop = asyncio.get_running_loop()
-        protocol = functools.partial(HttpProtocol, server=self)
+        protocol = functools.partial(ASGIHttpProtocol, server=self)
         listeners: Sequence[socket.SocketType]
 
         if sockets is not None:
@@ -252,7 +254,7 @@ class Server:
                     protocol, host=self.host, port=self.port, ssl=self.ssl, backlog=2048,
                 )
             except OSError as e:
-                self.logger.error(e)
+                self.error_logger.error(e)
                 await self.lifespan.shutdown()
                 sys.exit(1)
 

@@ -1,4 +1,4 @@
 from .parser import *
-from .http import HttpProtocol
+from .http import ASGIHttpProtocol
 
-__all__ = ["HttpProtocol"] + parser.__all__
+__all__ = ["ASGIHttpProtocol"] + parser.__all__

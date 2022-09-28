@@ -43,11 +43,11 @@ def get_sslcontext(transport: asyncio.Transport) -> SSLContext:
     return transport.get_extra_info("sslcontext")
 
 
-# def get_client_addr(scope: "WWWScope") -> str:
-#     client = scope.get("client")
-#     if not client:
-#         return ""
-#     return "%s:%d" % client
+def get_client_ip_addr(scope: "WWWScope") -> str:
+    client = scope.get("client")
+    if not client:
+        return ""
+    return "%s:%d" % client
 
 
 def get_path_with_query_string(scope: "WWWScope") -> str:
