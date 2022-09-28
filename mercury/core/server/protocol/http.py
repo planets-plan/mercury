@@ -1,20 +1,30 @@
-import asyncio
+import re
 import http
 import logging
+import asyncio
 import urllib.parse
-import traceback
 
 from collections import deque
 from asyncio import Protocol, Transport
 
-from mercury.type import List, Tuple, Literal, Optional, TYPE_CHECKING
+from mercury.type import cast, List, Tuple, Union, Literal, Optional, Callable, TYPE_CHECKING
 
 from .utils import get_server_addr, get_client_addr
 from .parser import HttpParserError, HttpParserUpgrade, HttpRequestParser
 
 if TYPE_CHECKING:
     from mercury.type import Deque
-    from mercury.type import Scope, HTTPScope, ASGI3Application
+    from mercury.type import (
+        Scope,
+        HTTPScope,
+        ASGISendEvent,
+        ASGIReceiveEvent,
+        ASGI3Application,
+        HTTPRequestEvent,
+        HTTPDisconnectEvent,
+        HTTPResponseBodyEvent,
+        HTTPResponseStartEvent,
+    )
     from mercury.core.server.server import Server, ServerHandler
 
 
@@ -26,9 +36,9 @@ def _get_status_line(status_code: int) -> bytes:
     return b"".join([b"HTTP/1.1 ", str(status_code).encode(), b" ", phrase, b"\r\n"])
 
 
-STATUS_LINE = {
-    status_code: _get_status_line(status_code) for status_code in range(100, 600)
-}
+STATUS_LINE = {status_code: _get_status_line(status_code) for status_code in range(100, 600)}
+HTTP_HEADER_NAME_CHECK_RE = re.compile(b'[\x00-\x1F\x7F()<>@,;:[]={} \t\\"]')
+HTTP_HEADER_VALUE_CHECK_RE = re.compile(b"[\x00-\x1F\x7F]")
 
 
 class HttpRequest:
@@ -40,10 +50,17 @@ class HttpResponse:
 
 
 class ASGIHttpHandler:
-    def __init__(self, scope: "Scope", server: "Server", protocol: "HttpProtocol") -> None:
-        self.logger = server.logger
-        self.message_event = asyncio.Event()
-        self.status_line = {status_code: self._get_status_line(status_code) for status_code in range(100, 600)}
+    def __init__(self, scope: "Scope", protocol: "HttpProtocol", transport: "asyncio.Transport", on_response: Callable[..., None]) -> None:
+        self.server = protocol.server
+        self.logger = protocol.server.logger
+        self.transport = transport
+        self.on_response = on_response
+        self.event_flag = asyncio.Event()
+
+        # Connection State
+        self.scope = scope
+        self.protocol = protocol
+        self.is_disconnected: bool = False
 
         # Request State
         self.body: bytes = b""
@@ -51,8 +68,8 @@ class ASGIHttpHandler:
 
         # Response State
         self.excepted_content_length = 0
-        self.is_chunked_encoding: Optional[bool] = None
         self.is_response_start: bool = False
+        self.is_chunked_encoding: Optional[bool] = None
         self.is_response_complete: bool = False
 
     @staticmethod
@@ -71,7 +88,7 @@ class ASGIHttpHandler:
             )
         message = cast("HTTPResponseStartEvent", message)
 
-        self.protocol.is_response_start = True
+        self.is_response_start = True
         self.protocol.is_100_continue = False
 
         status_code: int = message.get("status")
@@ -81,7 +98,7 @@ class ASGIHttpHandler:
         if close_header in self.scope["headers"] and close_header not in headers:
             headers = headers + [close_header]
 
-        content: List[bytes] = [self.status_line.get(status_code)]
+        content: List[bytes] = [STATUS_LINE.get(status_code)]
 
         for name, value in headers:
             if HTTP_HEADER_NAME_CHECK_RE.search(name):
@@ -90,42 +107,22 @@ class ASGIHttpHandler:
                 raise RuntimeError("Invalid HTTP header value.")
 
             name = name.lower()
-            if name == b"content-length" and self.protocol.is_chunked_encoding is None:
-                self.protocol.excepted_content_length = int(value.decode())
-                self.protocol.is_chunked_encoding = False
+            if name == b"content-length" and self.is_chunked_encoding is None:
+                self.excepted_content_length = int(value.decode())
+                self.is_chunked_encoding = False
             elif name == b"transfer-encoding" and value.lower() == b"chunked":
-                self.protocol.excepted_content_length = 0
-                self.protocol.is_chunked_encoding = True
+                self.excepted_content_length = 0
+                self.is_chunked_encoding = True
             elif name == b"connection" and value.lower() == b"close":
                 self.keepalive = False
             content.extend([name, b": ", value, b"\r\n"])
 
-        if self.protocol.is_chunked_encoding is None and self.scope["method"] != "HEAD" and status_code not in (204, 304):
-            self.protocol.is_chunked_encoding = True
+        if self.is_chunked_encoding is None and self.scope["method"] != "HEAD" and status_code not in (204, 304):
+            self.is_chunked_encoding = True
             content.append(b"transfer-encoding: chunked\r\n")
 
         content.append(b"\r\n")
         self.transport.write(b"".join(content))
-
-    def _on_response_complete(self) -> None:
-        self.protocol.server.request_number += 1
-
-        if self.transport.is_closing():
-            return
-
-        # self._unset_keepalive_if_requite()
-        #
-        # self.timeout_keep_alive_task = self.protocol.loop.call_later(
-        #     self.timeout_keep_alive, self.timemout_keep_alive_handler
-        # )
-
-        self.protocol.resume_reading()
-
-        if self.protocol.pipeline:
-            handler, application = self.protocol.pipeline.pop()
-            task = self.protocol.loop.create_task(self.run(application))
-            task.add_done_callback(self.protocol.server.tasks.discard)
-            self.protocol.server.tasks.add(task)
 
     def _send_response_body(self, message: "ASGISendEvent"):
         message_type = message.get("type", "")
@@ -139,8 +136,8 @@ class ASGIHttpHandler:
 
         # handle chunk
         if self.scope["method"] == "HEAD":
-            self.protocol.excepted_content_length = 0
-        elif self.protocol.is_chunked_encoding:
+            self.excepted_content_length = 0
+        elif self.is_chunked_encoding:
             if body:
                 content = [b"%x\r\n" % len(body), body, b"\r\n"]
             else:
@@ -150,68 +147,24 @@ class ASGIHttpHandler:
             self.transport.write(b"".join(content))
         else:
             content_length = len(body)
-            if content_length > self.protocol.excepted_content_length:
+            if content_length > self.excepted_content_length:
                 raise RuntimeError("Response content longer than Content-Length")
             else:
-                self.protocol.excepted_content_length -= content_length
+                self.excepted_content_length -= content_length
             self.transport.write(body)
 
         if not more_body:
-            if self.protocol.excepted_content_length != 0:
+            if self.excepted_content_length != 0:
                 raise RuntimeError("Response content shorter than Content-Length")
-            self.protocol.is_response_complete = True
-            self.message_event.set()
-            if not self.protocol.is_keep_alive:
+            self.is_response_complete = True
+            self.event_flag.set()
+            if not self.protocol.is_keepalive:
                 self.transport.close()
-            self._on_response_complete()
-
-    async def send(self, message: "ASGISendEvent") -> None:
-        print(f"protocol id {id(self.protocol)}")
-        # not disconnected and write paused
-        if self.protocol.is_write_paused and not self.protocol.is_disconnected:
-            await self.protocol.waite_until_can_write()
-
-        # disconnected
-        if self.protocol.is_disconnected:
-            return
-
-        if not self.protocol.is_response_start:
-            # response not start
-            self._send_response_start(message)
-        elif not self.protocol.is_response_complete:
-            # response not complete
-            self._send_response_body(message)
-        else:
-            # response is already sent
-            raise RuntimeError(
-                f"Unexpected ASGI message '{message['type']}' sent, after response already completed."
-            )
+            self.on_response()
 
     def handle_100_continue(self) -> None:
         self.transport.write(b"HTTP/1.1 100 Continue\r\n\r\n")
         self.protocol.is_100_continue = False
-
-    async def receive(self) -> "ASGIReceiveEvent":
-        if self.protocol.is_100_continue and not self.transport.is_closing():
-            self.handle_100_continue()
-
-        if not self.protocol.is_disconnected and not self.protocol.is_response_complete:
-            self.protocol.pause_reading()
-            await self.message_event.wait()
-            self.message_event.clear()
-
-        message: "Union[HTTPDisconnectEvent, HTTPRequestEvent]"
-        if self.protocol.is_disconnected or self.protocol.is_response_complete:
-            message = {"type": "http.disconnect"}
-        else:
-            message = {
-                "type": "http.request",
-                "body": self.protocol.body,
-                "more_body": self.protocol.body,
-            }
-            self.protocol.body = b""
-
-        return message
 
     async def send_500_response(self) -> None:
         response_start_event: "HTTPResponseStartEvent" = {
@@ -237,7 +190,7 @@ class ASGIHttpHandler:
             msg = "Exception in ASGI application\n"
             self.logger.error(msg, exc_info=e)
 
-            if not self.protocol.is_response_start:
+            if not self.is_response_start:
                 await self.send_500_response()
             else:
                 self.transport.close()
@@ -245,19 +198,64 @@ class ASGIHttpHandler:
             if result is not None:
                 self.logger.error(f"ASGI callable should return None, but returned '{result}'.")
                 self.transport.close()
-            elif not self.protocol.is_response_start and not self.protocol.is_disconnected:
+            elif not self.is_response_start and not self.is_disconnected:
                 self.logger.error("ASGI callable returned without starting response.")
                 await self.send_500_response()
-            elif not self.protocol.is_response_complete and not self.protocol.is_disconnected:
+            elif not self.is_response_complete and not self.is_disconnected:
                 self.logger.error("ASGI callable returned without completing response.")
                 self.transport.close()
+
+    async def send(self, message: "ASGISendEvent") -> None:
+        """ Call all ASGISendEvent(write) event by connection state """
+        if self.protocol.is_write_paused and not self.is_disconnected:
+            # 如果 protocol 没有在处理写事件并且次处理器未被断开：等待直到可以执行写事件
+            await self.protocol.waite_until_can_write()
+
+        if self.is_disconnected:
+            # 如果处理器处于断开状态
+            return
+
+        if not self.is_response_start:
+            # response not start
+            self._send_response_start(message)
+
+        elif not self.is_response_complete:
+            # response not complete
+            self._send_response_body(message)
+
+        else:
+            # response is already sent
+            raise RuntimeError(
+                f"Unexpected ASGI message '{message['type']}' sent, after response already completed."
+            )
+
+    async def receive(self) -> "ASGIReceiveEvent":
+        if self.protocol.is_100_continue and not self.transport.is_closing():
+            self.handle_100_continue()
+
+        if not self.is_disconnected and not self.is_response_complete:
+            self.protocol.pause_read()
+            await self.event_flag.wait()
+            self.event_flag.clear()
+
+        message: "Union[HTTPDisconnectEvent, HTTPRequestEvent]"
+        if self.is_disconnected or self.is_response_complete:
+            message = {"type": "http.disconnect"}
+        else:
+            message = {
+                "type": "http.request",
+                "body": self.protocol.body,
+                "more_body": self.protocol.body,
+            }
+            self.protocol.body = b""
+
+        return message
 
 
 class HttpProtocol(Protocol):
     """
     ASGI HTTP sub-specification's asyncio protocol, using llhttp as parser.
     """
-
     def __init__(self, server: "Server", _loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
         self.loop = _loop or asyncio.get_running_loop()
         self.transport: Optional[Transport] = None
@@ -265,22 +263,21 @@ class HttpProtocol(Protocol):
         self.server = server
         self.handler: Optional["ASGIHttpHandler"] = None
         self.parser: HttpRequestParser = HttpRequestParser(self)
-
-        self.logger = None
         self.error_logger = logging.getLogger("mercury.server.error")
         self.access_logger = logging.getLogger("mercury.server.access")
 
         # State
-        self.is_read_paused: bool = False
-        self.is_write_paused: bool = False
-
         self._write_flag: asyncio.Event = asyncio.Event()
         self._write_flag.set()
 
+        self.is_read_paused: bool = False
+        self.is_write_paused: bool = False
+        self.timeout_keepalive: int = 5
+        self.timeout_keepalive_task: Optional[asyncio.TimerHandle] = None
+
         # HTTP Connection Scope
-        self.is_keep_alive: bool = False
+        self.is_keepalive: bool = False
         self.is_100_continue: bool = False
-        self.is_disconnected: bool = False
 
         self.url = b""
         self.scope: Optional["HTTPScope"] = None
@@ -290,20 +287,68 @@ class HttpProtocol(Protocol):
         self.client_addr: Optional[Tuple[str, int]] = None
         self.pipeline: Deque[Tuple["ServerHandler", "ASGI3Application"]] = deque()
 
+    # http connection flow control function
+    def pause_read(self) -> None:
+        if not self.is_read_paused:
+            self.is_read_paused = True
+            self.transport.pause_reading()
+
+    def resume_read(self) -> None:
+        if self.is_read_paused:
+            self.is_read_paused = False
+            self.transport.resume_reading()
+
+    def pause_write(self) -> None:
+        if not self.is_write_paused:
+            self.is_write_paused = True
+            self._write_flag.clear()
+
+    def resume_write(self) -> None:
+        if self.is_write_paused:
+            self.is_write_paused = False
+            self._write_flag.set()
+
+    # asyncio protocol abstract function
     def connection_made(self, transport: Transport) -> None:
-        # TODO logging
-        # TODO connections manage | flow manage
-        # one connection_made one connection one protocol one transport
-        # one connection many http
+        """ Called when a connection is made. """
         self.server.connections.add(self)
+
         self.transport = transport
         self.server_addr = get_server_addr(transport)
         self.client_addr = get_client_addr(transport)
-        self.scheme = "https" if self.server.is_ssl else "http"
+        self.scheme = "https" if bool(self.transport.get_extra_info("sslcontext")) else "http"
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
+        """ Called when the connection is lost or closed. """
         self.server.connections.discard(self)
 
+        if self.handler and not self.handler.is_response_complete:
+            self.handler.is_disconnected = True
+
+        if self.handler is not None:
+            self.handler.event_flag.set()
+
+        if self.transport is not None:
+            self.resume_write()
+
+        if exc is None:
+            self.transport.close()
+
+    def data_received(self, data: bytes) -> None:
+        try:
+            self.parser.feed_data(data)
+        except HttpParserError as e:
+            msg = "Invalid HTTP request received."
+            self.error_logger.warning(f"{msg} {str(e)}.")
+            self._send_400_response(msg)
+            return
+        except HttpParserUpgrade:
+            self._handle_upgrade()
+
+    def eof_received(self) -> Optional[bool]:
+        pass
+
+    # llhttp callback
     def _handle_upgrade(self):
         pass
 
@@ -323,25 +368,35 @@ class HttpProtocol(Protocol):
         self.transport.write(b"".join(content))
         self.transport.close()
 
-    def data_received(self, data: bytes) -> None:
-        try:
-            self.parser.feed_data(data)
-        except HttpParserError as e:
-            msg = "Invalid HTTP request received."
-            self.error_logger.warning(f"{msg} {str(e)}.")
-            self._send_400_response(msg)
-            return
-        except HttpParserUpgrade:
-            self._handle_upgrade()
+    def _unset_keepalive_if_required(self) -> None:
+        if self.timeout_keepalive_task is not None:
+            self.timeout_keepalive_task.cancel()
+            self.timeout_keepalive_task = None
 
-    def eof_received(self) -> Optional[bool]:
-        pass
+    async def waite_until_can_write(self) -> None:
+        await self._write_flag.wait()
 
-    def shutdown(self) -> None:
-        if self.handler is None or self.is_response_complete:
+    def _timeout_keepalive_handler(self) -> None:
+        if not self.transport.is_closing():
             self.transport.close()
-        else:
-            pass
+
+    def _handler_callback(self) -> None:
+        self.server.request_number += 1
+
+        if self.transport.is_closing():
+            return
+
+        self._unset_keepalive_if_required()
+
+        self.timeout_keepalive_task = self.loop.call_later(self.timeout_keepalive, self._timeout_keepalive_handler)
+
+        self.resume_read()
+
+        if self.pipeline:
+            handler, application = self.pipeline.pop()
+            task = self.loop.create_task(handler.run(application))
+            task.add_done_callback(self.server.tasks.discard)
+            self.server.tasks.add(task)
 
     # llhttp callback
     def on_message_begin(self) -> None:
@@ -364,32 +419,9 @@ class HttpProtocol(Protocol):
             self.is_100_continue = True
         self.headers.append((name, value))
 
-    async def waite_until_can_write(self) -> None:
-        await self._write_flag.wait()
-
-    def pause_reading(self) -> None:
-        if not self.is_read_paused:
-            self.is_read_paused = True
-            self.transport.pause_reading()
-
-    def resume_reading(self) -> None:
-        if self.is_read_paused:
-            self.is_read_paused = False
-            self.transport.resume_reading()
-
-    def _pause_writing(self) -> None:
-        if not self.is_write_paused:
-            self.is_write_paused = True
-            self._write_flag.clear()
-
-    def _resume_writing(self) -> None:
-        if self.is_write_paused:
-            self.is_write_paused = False
-            self._write_flag.set()
-
     def on_headers_complete(self) -> None:
         http_version = self.parser.get_http_version()
-        self.is_keep_alive = self.parser.should_keep_alive()
+        self.is_keepalive = self.parser.should_keep_alive()
         self.scope["http_version"] = http_version if http_version else "1.1"
 
         method = self.parser.get_method()
@@ -409,28 +441,36 @@ class HttpProtocol(Protocol):
 
         # TODO handle 503
 
-        current_handler = self.handler
-        self.handler = self.server.handler_class(scope=self.scope, protocol=self, transport=self.transport)
-        if current_handler is None or self.is_response_complete:
+        old_handler = self.handler
+        self.handler = ASGIHttpHandler(scope=self.scope, protocol=self, transport=self.transport, on_response=self._handler_callback)
+
+        if old_handler is None or old_handler.is_response_complete:
             task = self.loop.create_task(self.handler.run(self.server.loaded_app))
             task.add_done_callback(self.server.tasks.discard)
             self.server.tasks.add(task)
         else:
-            self.pause_reading()
+            self.pause_read()
             self.pipeline.appendleft((self.handler, self.server.loaded_app))
 
     def on_body(self, body: bytes) -> None:
-        if self.parser.should_upgrade() or self.is_response_complete:
+        if self.parser.should_upgrade() or self.handler.is_response_complete:
             return
 
-        self.body += body
-        if len(self.body) > 65536:
-            self.pause_reading()
-        self.handler.message_event.set()
+        self.handler.body += body
+        if len(self.handler.body) > 65536:
+            self.pause_read()
+        self.handler.event_flag.set()
 
     def on_message_complete(self) -> None:
-        if self.parser.should_upgrade() or self.is_response_complete:
+        if self.parser.should_upgrade() or self.handler.is_response_complete:
             return
-        self.more_body = False
+        self.handler.more_body = False
         if self.handler:
-            self.handler.message_event.set()
+            self.handler.event_flag.set()
+
+    # connection control function
+    def shutdown(self) -> None:
+        if self.handler is None or self.handler.is_response_complete:
+            self.transport.close()
+        else:
+            self.handler.is_keepalive = False

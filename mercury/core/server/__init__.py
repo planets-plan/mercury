@@ -2,13 +2,12 @@ from mercury.type import ServerConfigOptions
 
 from mercury.utils.log import logging_init
 
-from .server import Server, ServerHandler
+from .server import Server
 
 
 __all__ = [
     "run",
     "Server",
-    "ServerHandler"
 ]
 
 
