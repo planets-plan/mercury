@@ -30,6 +30,10 @@ app2 = FastAPI()
 async def root():
     return {"message": "Hello World"}
 
+@app2.get("/apple")
+async def root2():
+    return {"message": "Hello Apple"}
+
 
 if __name__ == "__main__":
     options: ServerConfigOptions = {

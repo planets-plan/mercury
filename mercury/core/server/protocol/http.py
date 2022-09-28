@@ -41,14 +41,6 @@ HTTP_HEADER_NAME_CHECK_RE = re.compile(b'[\x00-\x1F\x7F()<>@,;:[]={} \t\\"]')
 HTTP_HEADER_VALUE_CHECK_RE = re.compile(b"[\x00-\x1F\x7F]")
 
 
-class HttpRequest:
-    pass
-
-
-class HttpResponse:
-    pass
-
-
 class ASGIHttpHandler:
     def __init__(self, scope: "Scope", protocol: "HttpProtocol", transport: "asyncio.Transport", on_response: Callable[..., None]) -> None:
         self.server = protocol.server
@@ -258,11 +250,10 @@ class HttpProtocol(Protocol):
     """
     def __init__(self, server: "Server", _loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
         self.loop = _loop or asyncio.get_running_loop()
-        self.transport: Optional[Transport] = None
-
         self.server = server
-        self.handler: Optional["ASGIHttpHandler"] = None
         self.parser: HttpRequestParser = HttpRequestParser(self)
+        self.handler: Optional["ASGIHttpHandler"] = None
+        self.transport: Optional[Transport] = None
         self.error_logger = logging.getLogger("mercury.server.error")
         self.access_logger = logging.getLogger("mercury.server.access")
 
@@ -348,7 +339,7 @@ class HttpProtocol(Protocol):
     def eof_received(self) -> Optional[bool]:
         pass
 
-    # llhttp callback
+    # llhttp callback need
     def _handle_upgrade(self):
         pass
 
@@ -400,6 +391,9 @@ class HttpProtocol(Protocol):
 
     # llhttp callback
     def on_message_begin(self) -> None:
+        self.url = b""
+        self.headers = []
+        self.is_100_continue = False
         self.scope = {
             "type": "http",
             "asgi": {"version": self.server.asgi_version, "spec_version": "2.3"},
@@ -420,30 +414,41 @@ class HttpProtocol(Protocol):
         self.headers.append((name, value))
 
     def on_headers_complete(self) -> None:
-        http_version = self.parser.get_http_version()
-        self.is_keepalive = self.parser.should_keep_alive()
-        self.scope["http_version"] = http_version if http_version else "1.1"
+        """ Invoked when headers are completed
 
-        method = self.parser.get_method()
-        self.scope["method"] = method.decode("ascii")
-
+        When headers are completed, we can:
+        1. get the connection states such as http_version, is_keepalive...
+        2. fill asgi http connection scope dict
+        3. create ASGIHttpHandler instance to handle http request or response event
+        """
         if self.parser.should_upgrade():
             return
 
+        # get connection state
+        http_version = self.parser.get_http_version()
+        self.is_keepalive = self.parser.should_keep_alive()
+        method = self.parser.get_method()
         parsed_url = urllib.parse.urlparse(self.url)
         raw_path = parsed_url.path
         path = raw_path.decode("ascii")
         if "%" in path:
             path = urllib.parse.unquote(path)
+
+        # fill asgi http connection scope
         self.scope["path"] = path
+        self.scope["method"] = method.decode("ascii")
         self.scope["raw_path"] = raw_path
         self.scope["query_string"] = parsed_url.query or b""
+        self.scope["http_version"] = http_version if http_version else "1.1"
 
         # TODO handle 503
 
+        # record old handler and create new ASGIHttpHandler
         old_handler = self.handler
         self.handler = ASGIHttpHandler(scope=self.scope, protocol=self, transport=self.transport, on_response=self._handler_callback)
 
+        # if not old_handler or old_handler is complete, create new task right now
+        # else pause http request stream read and add this task to connection pipeline
         if old_handler is None or old_handler.is_response_complete:
             task = self.loop.create_task(self.handler.run(self.server.loaded_app))
             task.add_done_callback(self.server.tasks.discard)
@@ -453,12 +458,14 @@ class HttpProtocol(Protocol):
             self.pipeline.appendleft((self.handler, self.server.loaded_app))
 
     def on_body(self, body: bytes) -> None:
+        """ Invoked when body  """
         if self.parser.should_upgrade() or self.handler.is_response_complete:
             return
 
         self.handler.body += body
         if len(self.handler.body) > 65536:
             self.pause_read()
+        # when request body is parser complete
         self.handler.event_flag.set()
 
     def on_message_complete(self) -> None:

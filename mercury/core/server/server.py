@@ -143,30 +143,6 @@ class Server:
         self.is_windows: bool = platform.system().lower() == "windows"
         self.need_subprocess: bool = bool(self.reload or self.worker_number > 1)
 
-        # start load func, load ssl, header and app.
-        self.load()
-
-    def _handle_exit(self, sig: int, frame: Optional[FrameType]) -> None:
-        if self.should_exit and sig == signal.SIGINT:
-            self.force_exit = True
-        else:
-            self.should_exit = True
-
-    def _install_signal_handlers(self) -> None:
-        if threading.current_thread() is not threading.main_thread():
-            # Signals can only be listened to from the main thread.
-            return
-
-        loop = asyncio.get_running_loop()
-
-        try:
-            for sig in HANDLED_SIGNALS:
-                loop.add_signal_handler(sig, self._handle_exit, sig, None)
-        except NotImplementedError:  # pragma: no cover
-            # Windows
-            for sig in HANDLED_SIGNALS:
-                signal.signal(sig, self._handle_exit)
-
     def load(self) -> None:
         # load event loop
         _asyncio_event_loop_init(self.need_subprocess)
@@ -227,27 +203,30 @@ class Server:
         else:
             self.lifespan = LifespanOn(self)
 
+        # bind func to handle the signal
+        self._install_signal_handlers()
+
         self.is_loaded = True
 
-    def log_started_message(self, listeners: Sequence[socket.SocketType]) -> None:
-        if self.fd is not None:
-            pass
-        elif self.uds is not None:
-            pass
-        else:
-            host = "0.0.0.0" if self.host is None else self.host
+    def run(self, sockets: Optional[List[socket.socket]] = None) -> None:
+        return asyncio.run(self.serve(sockets=sockets))
 
-            port = self.port
-            if port == 0:
-                port = listeners[0].getsockname()[1]
+    async def serve(self, sockets: Optional[List[socket.socket]] = None) -> None:
+        # start load func, load ssl, header and app.
+        if not self.is_loaded:
+            self.load()
 
-            protocol_name = "http"
+        process_id = os.getpid()
+        self.logger.info(colorize(f"Start MercuryServer on process [{process_id}]", fg='green'))
 
-            message = f"MercuryServer running on {protocol_name}://{host}:{port} (Press CTRL+C to quit)"
-            self.logger.info(message)
+        # serve main flow
+        await self.startup(sockets=sockets)
+        if self.should_exit:
+            return
+        await self.main_loop()
+        await self.shutdown(sockets=sockets)
 
-    def start_with_tcp(self):
-        pass
+        self.logger.info(f"Finished the MercuryServer on process [{process_id}]")
 
     async def startup(self, sockets: Optional[List] = None) -> None:
         # call lifespan startup
@@ -339,21 +318,40 @@ class Server:
         if not self.force_exit:
             await self.lifespan.shutdown()
 
-    async def serve(self, sockets: Optional[List[socket.socket]] = None) -> None:
-        process_id = os.getpid()
-
-        # bind func to handle the signal
-        self._install_signal_handlers()
-
-        self.logger.info(colorize(f"Start MercuryServer on process [{process_id}]", fg='green'))
-
-        await self.startup(sockets=sockets)
-        if self.should_exit:
+    def _install_signal_handlers(self) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            # Signals can only be listened to from the main thread.
             return
-        await self.main_loop()
-        await self.shutdown(sockets=sockets)
 
-        self.logger.info(f"Finished the MercuryServer on process [{process_id}]")
+        loop = asyncio.get_running_loop()
 
-    def run(self, sockets: Optional[List[socket.socket]] = None) -> None:
-        return asyncio.run(self.serve(sockets=sockets))
+        try:
+            for sig in HANDLED_SIGNALS:
+                loop.add_signal_handler(sig, self._handle_exit, sig, None)
+        except NotImplementedError:  # pragma: no cover
+            # Windows
+            for sig in HANDLED_SIGNALS:
+                signal.signal(sig, self._handle_exit)
+
+    def _handle_exit(self, sig: int, frame: Optional[FrameType]) -> None:
+        if self.should_exit and sig == signal.SIGINT:
+            self.force_exit = True
+        else:
+            self.should_exit = True
+
+    def log_started_message(self, listeners: Sequence[socket.SocketType]) -> None:
+        if self.fd is not None:
+            pass
+        elif self.uds is not None:
+            pass
+        else:
+            host = "0.0.0.0" if self.host is None else self.host
+
+            port = self.port
+            if port == 0:
+                port = listeners[0].getsockname()[1]
+
+            protocol_name = "http"
+
+            message = f"MercuryServer running on {protocol_name}://{host}:{port} (Press CTRL+C to quit)"
+            self.logger.info(message)

@@ -7,8 +7,9 @@ __pycache__/
 *$py.class
 
 # C extensions
-#*.c
+*.c
 *.so
+!mercury/core/server/protocol/parser/llhttp/*.c
 
 # Distribution / packaging
 .Python
